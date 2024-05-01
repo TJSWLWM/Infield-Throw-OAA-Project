@@ -1,0 +1,556 @@
+---
+title: "Infield Throw OAA Project"
+author: "Tanner Smith"
+date: "2023-11-20"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+
+### Load in Libraries
+library(tidyverse)
+library(broom)
+library(readr)
+library(dplyr)
+library(zoo)
+library(psych)
+library(ROCR)
+library(corrplot)
+library(car)
+library(pbkrtest)
+library(leaps)
+library(MASS)
+library(corrplot)
+library(glm2)
+library(aod)
+library(glmnet)
+library(caret)
+library(gbm)
+library(jtools)
+library(Rcpp)
+library(stargazer)
+library(stringi)
+library(lubridate)
+library(mice)
+library(xgboost)
+library(data.table)
+library(Metrics)
+library(randomForest)
+library(gridExtra)
+library(pROC)
+library(e1071)
+```
+#### Part 1: Querying Questions
+
+```{r}
+data <- read_csv("dataset_2024.csv")
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+
+```{r}
+#1
+##Which 5 infielders had the quickest exchange times on throws to first base? I am interpreting this as quickest average exchange time
+
+summary(data) #- wanted to check to confirm that all throws were to first base, and that fielder_id did not have null values. Exchange time does have 7 null values
+
+
+## Next step: filter for only infield thrower ids - 
+
+#define the infield positions (excluding 1st base)
+infield <- c('5', '4', '6')
+
+## Filter for only infield throwers
+data_inf <- data %>%
+  filter(thrower_position %in% infield)
+
+data_inf %>%
+  group_by(fielder_id) %>%
+  filter(exchange_time > 0) %>%
+  summarise(avg_exchange_time = mean(exchange_time)) %>%
+  arrange(avg_exchange_time) %>%
+  head(5)
+
+
+
+
+
+### Answer: Fielder 706, 307, 529, 247, and 272 with average exchange times of 0.034, 0.433, 0.433, 0.467, and 0.467
+
+
+```
+
+```{r}
+#2
+# #The infield coach wants to see which teams made the most errant throws to first base. An errant
+# throw is described as a throw that bounced and resulted in the runner being safe. Please create
+# a basic visual that you would present to the infield coach to present your findings.
+
+## first I want to create a binary variable for bounce that shows whether the ball bounced or not and a variable to show whether the runner was safe 
+
+
+
+data_inf <- data_inf %>%
+  mutate(bounce = ifelse(!is.na(bounce_pos_x) | !is.na(bounce_pos_y) | !is.na(bounce_velo_y) | !is.na(bounce_velo_z), 1, 0)) %>%
+  mutate(out = ifelse(batter_result == 'out', 1, 0)) 
+  
+
+## Now create the visual
+data_inf %>%
+  group_by(team_id) %>%
+  summarise(bounce_and_safe = sum(bounce == 1 & out == 0)) %>%
+  ggplot(aes(x = reorder(team_id, -bounce_and_safe), y = bounce_and_safe)) +
+  geom_col(fill = "skyblue", color = "black") +
+  labs(title = "Errant Throws by Team",
+       x = "Team ID",
+       y = "Number of Throws") +
+  theme_minimal()
+
+
+
+
+```
+
+```{r}
+#3
+# Looking at all infield throws to first base, given that the distance of the throw to first base was in
+# the top 90th percentile, what team had the best average exchange time? Which team had the
+# largest variation in exchange Time on these throws?
+
+unique(data_inf$receiver_position) # just to make sure that the receivers are all at first base - this is true
+
+## 
+
+data_inf <- data_inf %>%
+  mutate(
+    throw_distance = sqrt((receiver_pos_x - throw_pos_x)^2 + (receiver_pos_y - throw_pos_y)^2),
+    receiver_distance_traveled = (sqrt((receiver_pos_x - 90)^2 + (receiver_pos_y)^2) - receiver_dist_from_1b),
+    runner_distance_from_1b_at_throw = sqrt((batter_pos_x_at_throw - 90)^2 + (batter_pos_y_at_throw )^2)
+  )
+
+
+  
+
+#Best average exchange time
+data_inf %>%
+  group_by(team_id) %>%
+  filter(percent_rank(throw_distance) >= 0.9) %>%
+  summarise(avg_exchange_time = mean(exchange_time[exchange_time > 0])) %>%
+  arrange(avg_exchange_time) %>%
+  head(1)
+
+# Answer - Team 6 with an average exchange time of 1.11
+
+## Largest variation in exchange time on these throws
+data_inf %>%
+  group_by(team_id) %>%
+  filter(percent_rank(throw_distance) >= 0.9) %>%
+  summarise(average_variation_exchange_time = sd(exchange_time[exchange_time > 0])) %>%
+  arrange(desc(average_variation_exchange_time)) %>%
+  head(1)
+
+
+# Answer: Team 10 with an average variation in exchange time of 0.407
+
+  
+
+```
+
+```{r}
+# #4. Given that a throw was made less than 100 feet from first base, is there a correlation between
+# throw velocity and throw distance? Provide a basic visual alongside a brief explanation.
+
+data_inf <- data_inf %>%
+  mutate(throw_velocity = sqrt(data_inf$throw_velo_x^2 + data_inf$throw_velo_y^2 + data_inf$throw_velo_z^2),
+         bounce_velocity = sqrt(data_inf$bounce_velo_x^2 + data_inf$bounce_velo_y^2 + data_inf$bounce_velo_z^2))
+
+
+
+data_less_100 <- data_inf %>%
+  filter(throw_distance < 100)
+
+# Fitting a linear regression model for distance and velocity
+model <- lm(throw_distance ~ throw_velocity, data = data_less_100)
+
+# Calculating R-squared value
+r_squared <- summary(model)$r.squared
+
+# Creating a Scatter Plot for Throw Velo and Distance
+ggplot(data_less_100, aes(x = throw_velocity, y = throw_distance)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = FALSE, color = "blue") +
+  labs(title = "Throw Velocity and Distance < 100 Feet for INF to 1B",
+       x = "Velocity",
+       y = "Distance") +
+  annotate("text", x = max(data_less_100$throw_velocity), y = max(data_less_100$throw_distance),
+           label = paste("R-squared =", round(r_squared, 3)),
+           hjust = 1, vjust = 1) +
+  theme_minimal()
+
+print(r_squared)
+
+
+
+### There is a positive correlation, with an r_squared of 0.481 between throw velocity and distance of the throw, which makes sense logically
+
+
+```
+
+
+### Modeling Assignment
+
+##Goal: Build a model to calculate throw out probability added
+
+### Goals and Assumptions 
+ 
+```{r}
+
+### Goals: 
+
+#1 - Approach - first predict out probability before the play - before the throw. Then calculate after. The result will be the out probability added by the throw.
+
+
+#2 - We are predicting out probability - this could later be converted to a run value, but for now we are going with outs above/below average.
+
+#3 Variables of interest - safe (response), thrower_id (factor), receiver_position (factor), exchange_time, throw_distance, throw_velocity, bounce (binary), batter_distance_at_throw, batter_Velo_at_throw
+### Assumptions:
+
+#1 - Bounces are bad - this is not always the case, as occasionally fielders bounce the ball purposely to make it easier for the first basemen to field, but for model simplicity and because this happens somewhat infrequently we are going off of the assumption that bounces are bad
+
+#2 - The fielder is trying to record an out - we would have to do a lot of work to try to determine whether a fielder was truly trying to record an out with a throw or not that is beyond the scope of this project. To keep things simple, we are assuming all fielders want to record an out on each play.
+
+#3 - All first basemen are the same - this is obviously not true, but determining the skill of the first basemen in helping to record an out would be a separate modeling project. For the purposes of determining the value added of the throw we are assuming that the first basemen's skill does not influence whether an out is recorded or not
+
+#4 - Only care about infielders - excluding throws from pitchers, catchers, and outfielders. There is a case for allowing pitchers, and a smaller one for allowing catchers, but I think that due to the additional dynamics that come with plays from both I want to limit this to only infielders.
+
+#5 - Each play only results in 1 out recorded or not recorded - this is also obviously not true, as double plays happen, but the throw to first base usually only accounts for one of these outs (it is incredibly rare for example to see 4-3-6 or 5-3-6 DPs) So we are assuming each play made or not made is worth 1 out.
+
+#6 - To simplify, we only want to include plays where the same fielder who fielded the ball throws the ball - eliminate double play scenarios for the purposes of this
+
+
+```
+
+### Part 1: Data Processing
+
+```{r}
+### Data processing already done in previous part: 
+## 1. Computed throw velocity, bounce velocity (likely will not use), receiver_distance_traveled, safe (binary), bounce (binary)
+
+#First we will convert the factor variables from numeric to factors
+
+dif_field_thrower <- data_inf[as.numeric(data_inf$fielder_position) != as.numeric(data_inf$thrower_position), ]
+
+data_inf <- anti_join(data_inf, dif_field_thrower, by = "throw_id")
+
+## For simplification 
+
+factors_to_convert <- c('throw_id', 'team_id', 'fielder_id', 'fielder_position', 'thrower_id', 'receiver_id', 'throw_deflected_by_receiver', 'bounce', 'out', 'thrower_position')
+
+data_inf <- data_inf %>% mutate_at(vars(factors_to_convert), as.factor)
+
+#Checking the data - I want to go ahead and remove the null columns except for where the bounce info is null because the other null values are very low numbers (usually about 5-30)
+summary(data_inf)
+
+#Creating a list of potentially null columns to check
+columns_to_check <- c("exchange_time", "throw_pos_x", "throw_pos_y", 'throw_velo_x', 'throw_velo_y', 'throw_velo_z', 'batter_pos_x_at_throw', 
+'batter_pos_y_at_throw', 'batter_velo_at_throw', 'receiver_pos_x', 'receiver_pos_y', 'receiver_dist_from_1b', 'throw_distance', 'receiver_distance_traveled', 'runner_distance_from_1b_at_throw', 'throw_velocity')
+
+#removing nulls in these columns - removes 75 observations, which is worth it
+data_inf <- data_inf[complete.cases(data_inf[, columns_to_check]), ]
+
+
+summary(data_inf)
+
+data_inf_filt <- data_inf %>%
+  filter(throw_velocity >= 50 & batter_velo_at_throw >= 15)
+
+
+
+
+## Training and testing splits
+
+set.seed(1234)
+sample <- sample(c(TRUE, FALSE), nrow(data_inf), replace=TRUE, prob=c(0.7,0.3))
+train <- data_inf[sample, ]
+test <- data_inf[!sample, ]
+
+###
+```
+
+### Part 2: Visualization
+
+```{r}
+# Throw Velo and Runner Speed at Throw - this shows me I likely need minimum thresholds here - set these for 18 feet per second for the runner, 60 MPH for the throw, these are skewed left
+
+
+par(mfrow=c(2,2))
+hist(train$throw_velocity, col = "#A71930", xlab = "Throw Velocity", main = "Histogram of Throw Velocity")
+hist(train$batter_velo_at_throw, col = "#A71930", xlab = "Runner Speed at Throw", main = "Histogram of Runner Speed at Throw")
+boxplot(train$throw_velocity, col = "#A71930", main = "Boxplot of Throw Velocity")
+boxplot(train$batter_velo_at_throw, col = "#09ADAD", main = "Boxplot of Runner Speed at Throw")
+par(mfrow=c(1,1))
+
+```
+
+```{r}
+
+#Throw Distance and First Baseman (receiver) Distance Traveled - First Baseman almost always travels the same distance (which makes sense and probably does not need to be included in the models). Throw distance is roughly normally distributed
+
+par(mfrow=c(2,2))
+hist(train$throw_distance, col = "#A71930", xlab = "Throw Distance", main = "Histogram of Throw Distance")
+hist(train$receiver_distance_traveled, col = "#A71930", xlab = "First Basemen Distance Traveled", main = "Histogram of First Basemen Distance Traveled")
+boxplot(train$throw_distance, col = "#A71930", main = "Boxplot of Throw Distance")
+boxplot(train$receiver_distance_traveled, col = "#09ADAD", main = "Boxplot of First Basemen Distance Traveled")
+par(mfrow=c(1,1))
+```
+
+```{r}
+
+### Bounce and Safe - most of the plays in here are plays where the runner is out and the throw did not bounce, which makes sense because these are MLB infielders. Doing this slightly differently because I am graphing factor variables
+
+# Create the Bounce graph
+plot1 <- ggplot(train, aes(x = factor(bounce), fill = factor(bounce))) +
+  geom_bar() +
+  labs(title = "Distribution of Bounce",
+       x = "Bounce",
+       y = "Count") +
+  theme_minimal()
+
+# Create the Safe graph
+plot2 <- ggplot(train, aes(x = factor(safe), fill = factor(safe))) +
+  geom_bar() +
+  labs(title = "Distribution of Safe",
+       x = "Safe",
+       y = "Count") +
+  theme_minimal()
+
+# Arrange the plots side by side
+grid.arrange(plot1, plot2, ncol = 2)
+```
+
+```{r}
+
+### Redoing training and testing split after adjustment for filtering qualifying throws and runs
+set.seed(1234)
+sample <- sample(c(TRUE, FALSE), nrow(data_inf_filt), replace=TRUE, prob=c(0.7,0.3))
+train <- data_inf_filt[sample, ]
+test <- data_inf_filt[!sample, ]
+
+### now we have final training and testing sets of 10,110 and 4312 respectively
+
+```
+
+### Part 3 - Modeling
+
+```{r}
+### First lets design simple logistic regression models for out probability before the throw and out probability after. I am doing this for two reasons before moving on to models with slightly more complexity/predictive power:
+
+#1) Sanity checking - I want to see if the coefficients are generally going in the direction that they should and that adding throw components makes the model better. The overall goal is to make sure that I cleaned the data properly and that more complicated models will work as intended.
+
+#2) Create a baseline of performance to compare these more complex models to.
+
+
+
+# Design the logistic regression model for before the throw - the directions of these variables make sense
+before_log_model <- glm(
+  out ~ fielder_position + throw_distance + batter_pos_x_at_throw + batter_pos_y_at_throw + batter_velo_at_throw,
+  data = train,
+  family = "binomial")
+  
+summary(before_log_model) 
+
+### Now one for after
+
+after_log_model <- glm(
+  out ~ fielder_position + throw_distance + batter_pos_x_at_throw + batter_pos_y_at_throw + batter_velo_at_throw + exchange_time + throw_velocity + bounce,
+  data = train,
+  family = "binomial")
+  
+summary(after_log_model) 
+
+```
+
+```{r}
+# Create a Naive Bayes model for before
+before_nb_model <- naiveBayes(
+  out ~ throw_distance + batter_pos_x_at_throw + batter_pos_y_at_throw + batter_velo_at_throw,
+  data = train
+)
+
+summary(before_nb_model)
+
+# # Make predictions on the test set
+# before_nb_predictions <- predict(before_nb_model, newdata = test)
+
+after_nb_model <- naiveBayes(
+  out ~ fielder_position + throw_distance + batter_pos_x_at_throw + batter_pos_y_at_throw + batter_velo_at_throw + exchange_time + throw_velocity + bounce,
+  data = train
+)
+
+summary(after_nb_model)
+
+
+```
+
+```{r}
+
+# Create a Random Forests model for before
+
+before_rf_model <- randomForest(
+  out ~ throw_distance + batter_pos_x_at_throw + batter_pos_y_at_throw + batter_velo_at_throw,
+  data = train,
+  ntree = 100,  
+  mtry = 2
+)
+
+after_rf_model <- randomForest(
+  out ~ fielder_position + throw_distance + batter_pos_x_at_throw + batter_pos_y_at_throw + batter_velo_at_throw,
+  data = train,
+  ntree = 100,  
+  mtry = 2    
+)
+
+# Display the Random Forests model summary
+summary(before_rf_model)
+summary(after_rf_model)
+
+
+
+```
+### Model Evaluation
+
+```{r}
+# I am first going to take a slower more methodical approach to evaluating the logistic regression models performance on the training set for before and after for the reasons stated above. I then am going to create a function to evaluate the performance of each of my 3 more complete models (the after models) and choose a champion model
+
+### Evaluate those logistic regression models
+
+# Predicted probabilities for before model
+before_predicted_probs <- predict(before_log_model, type = "response")
+
+# Predicted class labels (1 or 0)
+before_predicted_labels <- ifelse(before_predicted_probs > 0.5, 1, 0)
+
+# Predicted probabilities for after model
+after_predicted_probs <- predict(after_log_model, type = "response")
+
+# Predicted class labels (1 or 0)
+after_predicted_labels <- ifelse(after_predicted_probs > 0.5, 1, 0)
+```
+
+```{r}
+# Create confusion matrices
+
+### Conclusions here: the model when we add the throw data gets slightly worse at predicting outs in cases where the runner is out (9170 without, 9140 with) but gets a lot better at predicting when a runner will be safe (506 vs. 273). Another way of saying this is we got a big increase in sensitivity (0.314 to 0.583) in exchange for a small decrease in specificity (0.992 to 0.989) Balanced accuracy goes up from 0.653 to 0.786.
+
+#before
+before_conf_matrix <- confusionMatrix(table(before_predicted_labels, train$out))
+print(before_conf_matrix)
+```
+
+```{r}
+#after
+after_conf_matrix <- confusionMatrix(table(after_predicted_labels, train$out))
+print(after_conf_matrix)
+```
+
+```{r}
+
+# Create ROC curve for before
+before_roc_curve <- roc(train$out, before_predicted_probs)
+
+# Plot ROC curve
+plot(before_roc_curve, main = "Before ROC Curve")
+
+# Create ROC curve for after
+after_roc_curve <- roc(train$out, after_predicted_probs)
+
+# Plot ROC curve
+plot(after_roc_curve, main = "After ROC Curve")
+```
+
+## Comparing the 3 models types
+
+```{r}
+
+
+  # Make predictions on the test set
+# Predicted probabilities for after model
+after_predicted_probs <- predict(after_log_model, newdata = test, type = "response")
+
+# Predicted class labels (1 or 0)
+log_predictions <- ifelse(after_predicted_probs > 0.5, 1, 0)
+nb_predictions <- predict(after_nb_model, newdata = test)
+rf_predictions <- predict(after_rf_model, newdata = test)
+
+```
+
+```{r}
+### Confusion Matrices
+
+# Create a confusion matrix
+log_conf_matrix <- table(Actual = test$out, Predicted = log_predictions)
+nb_conf_matrix <- table(Actual = test$out, Predicted = nb_predictions)
+rf_conf_matrix <- table(Actual = test$out, Predicted = rf_predictions)
+
+print(log_conf_matrix)
+print(nb_conf_matrix)
+print(rf_conf_matrix)
+
+### We can see from these confusion matrices that the logistic regression model does the best job at preventing false positives and false negatives. This is our champion model.
+
+```
+```{r}
+### Variable Influence Plot - as we would expect the batter positions at the time of the throw (X and Y) are highly colinear, while the rest of the variables do not overlap too much
+
+log_vif_plot <- vif(after_log_model)
+
+print(log_vif_plot)
+
+
+```
+### Outputting Predictions for Champion Model - Logistic Regression
+
+```{r}
+# Predict Out probabilities for before log model
+data_inf$fielder_indep_prediction <- predict(before_log_model, newdata = data_inf, type = "response")
+
+# Predict out probabilities for after log model
+data_inf$fielder_influenced_prediction <- predict(after_log_model, newdata = data_inf, type = "response")
+
+# Look at predictions to make sure they look as expected
+data_inf %>%
+  dplyr::select(out, fielder_indep_prediction, fielder_influenced_prediction) ## These look as expected
+
+```
+
+### Outputting Final Predictions
+
+```{r}
+
+### Now I am grouping by player and position to output individual player predictions 
+data_inf_grouped <- data_inf %>%
+  mutate(
+    out_prob_added = fielder_influenced_prediction - fielder_indep_prediction,
+  ) %>%
+  group_by(fielder_id, team_id, fielder_position) %>%
+  summarise(
+    sum_out_prob_added = sum(out_prob_added),
+    average_exchange_time = mean(exchange_time),
+    average_throw_velocity = mean(throw_velocity)
+  )
+
+
+```
+
+
+
+```{r}
+
+### Writing the final prediction file
+write.csv(data_inf_grouped, file = "Infield_Throw_OAA.csv")
+```
